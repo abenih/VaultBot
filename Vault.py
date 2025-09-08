@@ -1,11 +1,14 @@
 import os
 import logging
-from datetime import datetime
-from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler, 
+    MessageHandler, filters, ContextTypes, ConversationHandler
+)
+from database import init_db, user_exists, set_master_password, verify_master_password
 
 # Load environment variables
+from dotenv import load_dotenv
 load_dotenv()
 
 # Enable logging
@@ -14,6 +17,10 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# Conversation states
+AWAITING_PASSWORD = 1
+AWAITING_LOGIN = 2
 
 class VaultBot:
     def __init__(self):
@@ -27,88 +34,116 @@ class VaultBot:
         
     def setup_handlers(self):
         """Set up all message handlers"""
-        self.application.add_handler(CommandHandler("start", self.start_command))
-        self.application.add_handler(CallbackQueryHandler(self.button_callback, pattern='^start_button$'))
-        self.application.add_handler(MessageHandler(filters.VOICE, self.handle_voice_message))
+        # Conversation handler for registration and login
+        conv_handler = ConversationHandler(
+            entry_points=[CommandHandler('start', self.start_command)],
+            states={
+                AWAITING_PASSWORD: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_new_password)
+                ],
+                AWAITING_LOGIN: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_login_password)
+                ],
+            },
+            fallbacks=[CommandHandler('cancel', self.cancel_command)]
+        )
+        
+        self.application.add_handler(conv_handler)
         self.application.add_handler(CommandHandler("help", self.help_command))
         
-    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Send a welcome message with HTML formatting and an inline start button."""
-        keyboard = [[InlineKeyboardButton("🚀 Start Journaling", callback_data='start_button')]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Send a welcome message and check if user needs to set password or login"""
+        user_id = update.effective_user.id
         
-        welcome_text = (
-            "🔒 <b>Welcome to VaultBot!</b> 🔒\n\n"
-            "Your secure, voice-based journal.\n\n"
-            "• Record voice notes as journal entries\n"
-            "• Your data is encrypted and secure\n"
-            "• Access your entries anytime\n\n"
-            "Press Start to begin your journaling journey."
-        )
-        
-        await update.message.reply_text(
-            text=welcome_text,
-            parse_mode='HTML',
-            reply_markup=reply_markup
-        )
+        if not user_exists(user_id):
+            # New user - prompt for password setup
+            await update.message.reply_text(
+                "🔒 Welcome to VaultBot! 🔒\n\n"
+                "Your secure, voice-based journal.\n\n"
+                "📝 Please set your master password:",
+                parse_mode='HTML'
+            )
+            return AWAITING_PASSWORD
+        else:
+            # Existing user - prompt for login
+            await update.message.reply_text(
+                "🔒 Vault is locked.\n\n"
+                "Please enter your master password to unlock:",
+                parse_mode='HTML'
+            )
+            return AWAITING_LOGIN
 
-    async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle the callback from the inline button."""
-        query = update.callback_query
-        await query.answer()
+    async def handle_new_password(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Handle the new master password input"""
+        user_id = update.effective_user.id
+        password = update.message.text
         
-        await query.edit_message_text(
-            text="🔓 <b>VaultBot initiated!</b> 🔓\n\n"
-                 "Your journal is ready. You can now:\n\n"
-                 "• Send voice messages to add entries\n"
-                 "• Use /entries to view your past journals\n"
-                 "• Use /help for assistance",
-            parse_mode='HTML'
-        )
+        # Validate password strength
+        if len(password) < 6:
+            await update.message.reply_text(
+                "❌ Password must be at least 6 characters long.\n"
+                "Please try again:"
+            )
+            return AWAITING_PASSWORD
         
-    async def handle_voice_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle incoming voice messages."""
-        voice = update.message.voice
-        user = update.message.from_user
+        # Set the master password
+        set_master_password(user_id, password)
         
-        # Create user directory if it doesn't exist
-        user_dir = f"user_data/{user.id}"
-        os.makedirs(user_dir, exist_ok=True)
-        
-        # Generate filename with timestamp
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{user_dir}/voice_{timestamp}.ogg"
-        
-        # Download the voice message
-        voice_file = await voice.get_file()
-        await voice_file.download_to_drive(filename)
-        
-        # Confirm receipt
         await update.message.reply_text(
-            text=f"✅ <b>Journal entry saved!</b>\n"
-                 f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
-                 f"Duration: {voice.duration} seconds",
+            "✅ Master password set successfully!\n\n"
+            "🔓 Your vault is now secured and ready to use.\n\n"
+            "• Use /entry to record a new journal entry\n"
+            "• Use /help for assistance",
             parse_mode='HTML'
         )
         
-        # Here you would typically:
-        # 1. Store metadata in a database
-        # 2. Process the voice file (transcription, etc.)
-        logger.info(f"Voice message saved for user {user.id}: {filename}")
+        return ConversationHandler.END
+
+    async def handle_login_password(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Handle login password input"""
+        user_id = update.effective_user.id
+        password = update.message.text
+        
+        # Verify the password
+        if verify_master_password(user_id, password):
+            await update.message.reply_text(
+                "✅ Access granted!\n\n"
+                "🔓 Your vault is now unlocked.\n\n"
+                "• Use /entry to record a new journal entry\n"
+                "• Use /help for assistance",
+                parse_mode='HTML'
+            )
+            return ConversationHandler.END
+        else:
+            await update.message.reply_text(
+                "❌ Incorrect password.\n\n"
+                "Please try again:",
+                parse_mode='HTML'
+            )
+            return AWAITING_LOGIN
+
+    async def cancel_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Cancel the current operation"""
+        await update.message.reply_text(
+            "Operation cancelled.",
+            parse_mode='HTML'
+        )
+        return ConversationHandler.END
         
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Send a help message."""
+        """Send a help message"""
         help_text = (
             "🤖 <b>VaultBot Help</b>\n\n"
-            "• Just send a voice message to add a journal entry\n"
-            "• Use /entries to list your past entries (coming soon)\n"
-            "• Your data is private and secure\n\n"
+            "• Use /start to begin or access your vault\n"
+            "• Use /entry to record a new journal entry\n"
+            "• Your data is encrypted and secure\n\n"
             "Need more help? Contact support@vaultbot.com"
         )
         await update.message.reply_text(help_text, parse_mode='HTML')
         
     def run(self):
-        """Start the bot."""
+        """Start the bot and initialize database"""
+        init_db()  # Initialize database
         logger.info("Starting VaultBot...")
         self.application.run_polling()
 
