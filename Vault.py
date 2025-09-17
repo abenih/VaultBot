@@ -387,12 +387,12 @@ class VaultBot:
             await query.answer("Memo not found or access denied", show_alert=True)
             return
 
-        # Send the voice message first (this will appear as a new message below the current one)
+        # Send the voice message without caption
         try:
             await context.bot.send_voice(
                 chat_id=chat_id,
-                voice=file_id,
-                caption=f"🔊 Playing memo #{memo_id}"
+                voice=file_id
+                # Removed the caption parameter to eliminate "Playing memo #3" text
             )
             await query.answer("Playing your memo...")
         except Exception as e:
@@ -408,7 +408,7 @@ class VaultBot:
                 memo_date = memo['date'].split()[0] if ' ' in memo['date'] else memo['date']
                 break
 
-        # Send a new message with the options menu (this will appear below the voice message)
+        # Send a new message with the options menu
         await context.bot.send_message(
             chat_id=chat_id,
             text=f"🔊 Memo #{memo_id} ({memo_date})\n\n"
