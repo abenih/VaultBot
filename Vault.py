@@ -5,7 +5,7 @@ from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, 
     MessageHandler, filters, ContextTypes
 )
-from database import init_db, user_exists, set_master_password, verify_master_password, save_voice_memo, get_user_memos
+from database import init_db, user_exists, set_master_password, verify_master_password, save_voice_memo, get_user_memos, get_memo_file_id, delete_memo
 
 # Load environment variables
 from dotenv import load_dotenv
@@ -123,6 +123,10 @@ class VaultBot:
             await self.lock_handler(query, context)
         elif query.data == "back_to_menu":
             await self.back_to_menu_handler(query, context)
+        elif query.data.startswith("listen_"):
+            await self.listen_memo_handler(query, context)
+        elif query.data.startswith("delete_"):
+            await self.delete_memo_handler(query, context)
     
     async def start_bot(self, query, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Start the bot flow"""
@@ -318,17 +322,83 @@ class VaultBot:
             )
             return
         
-        # Format the memos list
-        memo_list = "\n".join([
-            f"• Memo {memo['id']} ({memo['date'].split()[0]})" for memo in memos
-        ])
+        # Create inline keyboard with listen and delete buttons for each memo
+        keyboard = []
+        for memo in memos:
+            # Format date for display
+            memo_date = memo['date'].split()[0] if ' ' in memo['date'] else memo['date']
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"🎵 Play #{memo['id']} ({memo_date})", 
+                    callback_data=f"listen_{memo['id']}"
+                ),
+                InlineKeyboardButton(
+                    f"🗑️ Delete", 
+                    callback_data=f"delete_{memo['id']}"
+                )
+            ])
+        
+        # Add back button
+        keyboard.append([InlineKeyboardButton("🔙 Back to Menu", callback_data="back_to_menu")])
         
         await query.edit_message_text(
-            f"📋 Your memos:\n\n{memo_list}\n\n"
-            "Select a memo to listen to it.",
+            "📋 Your memos:\n\n"
+            "Select a memo to listen to it:",
             parse_mode='HTML',
-            reply_markup=get_main_menu_inline_keyboard()
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
+
+    async def listen_memo_handler(self, query, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle listening to a specific memo"""
+        user_id = query.from_user.id
+        
+        # Extract memo ID from callback data
+        try:
+            memo_id = int(query.data.replace("listen_", ""))
+        except ValueError:
+            await query.answer("Invalid memo ID")
+            return
+        
+        # Get the file_id for this memo
+        file_id = get_memo_file_id(memo_id, user_id)
+        
+        if not file_id:
+            await query.answer("Memo not found or access denied", show_alert=True)
+            return
+        
+        # Send the voice message
+        try:
+            await context.bot.send_voice(
+                chat_id=user_id,
+                voice=file_id,
+                caption=f"🔊 Playing memo #{memo_id}"
+            )
+            await query.answer("Playing your memo...")
+        except Exception as e:
+            logger.error(f"Error sending voice message: {e}")
+            await query.answer("Error playing memo", show_alert=True)
+        
+        # Keep the memo list visible after playing
+        await self.my_memos_handler(query, context)
+
+    async def delete_memo_handler(self, query, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle deleting a memo"""
+        user_id = query.from_user.id
+        
+        # Extract memo ID from callback data
+        try:
+            memo_id = int(query.data.replace("delete_", ""))
+        except ValueError:
+            await query.answer("Invalid memo ID")
+            return
+        
+        # Delete the memo
+        if delete_memo(memo_id, user_id):
+            await query.answer(f"Memo #{memo_id} deleted")
+            # Refresh the memo list
+            await self.my_memos_handler(query, context)
+        else:
+            await query.answer("Failed to delete memo", show_alert=True)
 
     async def help_handler(self, query, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle Help button press"""
