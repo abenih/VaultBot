@@ -1,8 +1,9 @@
-# database.py - This should ONLY contain database functions
+# database.py - Database functions for VaultBot
 import sqlite3
 import bcrypt
 import logging
-from typing import Optional
+from datetime import datetime
+from typing import Optional, List, Dict
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,17 @@ def init_db():
                 user_id INTEGER PRIMARY KEY,
                 master_password_hash TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Create memos table if it doesn't exist
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS memos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                file_id TEXT NOT NULL,
+                date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
             )
         ''')
         
@@ -95,4 +107,68 @@ def verify_master_password(user_id: int, password: str) -> bool:
         return is_valid
     except Exception as e:
         logger.error(f"Error verifying password: {e}")
+        return False
+
+def save_voice_memo(user_id: int, file_id: str) -> bool:
+    """Save a voice memo to the database"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            'INSERT INTO memos (user_id, file_id) VALUES (?, ?)',
+            (user_id, file_id)
+        )
+        
+        conn.commit()
+        conn.close()
+        logger.info(f"Voice memo saved for user {user_id} with file_id {file_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Error saving voice memo: {e}")
+        return False
+
+def get_user_memos(user_id: int) -> List[Dict]:
+    """Get all memos for a user"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            'SELECT id, file_id, date FROM memos WHERE user_id = ? ORDER BY date DESC',
+            (user_id,)
+        )
+        
+        memos = []
+        for row in cursor.fetchall():
+            memos.append({
+                'id': row[0],
+                'file_id': row[1],
+                'date': row[2]
+            })
+        
+        conn.close()
+        logger.info(f"Retrieved {len(memos)} memos for user {user_id}")
+        return memos
+    except Exception as e:
+        logger.error(f"Error retrieving memos: {e}")
+        return []
+
+def delete_memo(memo_id: int, user_id: int) -> bool:
+    """Delete a specific memo"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            'DELETE FROM memos WHERE id = ? AND user_id = ?',
+            (memo_id, user_id)
+        )
+        
+        conn.commit()
+        conn.close()
+        logger.info(f"Deleted memo {memo_id} for user {user_id}")
+        return cursor.rowcount > 0
+    except Exception as e:
+        logger.error(f"Error deleting memo: {e}")
         return False

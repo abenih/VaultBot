@@ -5,7 +5,7 @@ from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, 
     MessageHandler, filters, ContextTypes
 )
-from database import init_db, user_exists, set_master_password, verify_master_password
+from database import init_db, user_exists, set_master_password, verify_master_password, save_voice_memo, get_user_memos
 
 # Load environment variables
 from dotenv import load_dotenv
@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 # Conversation states
 AWAITING_PASSWORD = 1
 AWAITING_LOGIN = 2
+AWAITING_VOICE = 3  # New state for voice messages
 
 # Inline keyboards
 def get_start_inline_keyboard():
@@ -48,6 +49,11 @@ def get_help_inline_keyboard():
         [InlineKeyboardButton("🚀 Start Over", callback_data="start_bot")]
     ])
 
+def get_back_to_menu_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 Back to Menu", callback_data="back_to_menu")]
+    ])
+
 class VaultBot:
     def __init__(self):
         self.token = os.getenv('BOT_TOKEN')
@@ -69,6 +75,11 @@ class VaultBot:
         # Add handler for text messages (for password input)
         self.application.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text_input)
+        )
+        
+        # Add handler for voice messages
+        self.application.add_handler(
+            MessageHandler(filters.VOICE, self.handle_voice_message)
         )
         
     async def start_command_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -110,6 +121,8 @@ class VaultBot:
             await self.help_handler(query, context)
         elif query.data == "lock_vault":
             await self.lock_handler(query, context)
+        elif query.data == "back_to_menu":
+            await self.back_to_menu_handler(query, context)
     
     async def start_bot(self, query, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Start the bot flow"""
@@ -228,18 +241,39 @@ class VaultBot:
                 parse_mode='HTML',
                 reply_markup=get_auth_inline_keyboard()
             )
-
-    async def lock_handler(self, query, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Lock the vault"""
-        # Clear authentication state
-        context.user_data['authenticated'] = False
+    
+    async def handle_voice_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle voice messages"""
+        # Check if user is authenticated and in the correct state
+        if not context.user_data.get('authenticated') or context.user_data.get('state') != AWAITING_VOICE:
+            await update.message.reply_text(
+                "🔒 Please start by unlocking your vault and selecting 'New Memo'.",
+                parse_mode='HTML',
+                reply_markup=get_auth_inline_keyboard()
+            )
+            return
         
-        await query.edit_message_text(
-            "🔒 Vault locked.\n\n"
-            "Click the button below to unlock when you're ready.",
-            parse_mode='HTML',
-            reply_markup=get_auth_inline_keyboard()
-        )
+        user_id = update.effective_user.id
+        voice = update.message.voice
+        file_id = voice.file_id
+        
+        # Save the voice memo to database
+        if save_voice_memo(user_id, file_id):
+            await update.message.reply_text(
+                "✅ Memo saved!\n\n"
+                "Your voice message has been securely stored.",
+                parse_mode='HTML',
+                reply_markup=get_back_to_menu_keyboard()
+            )
+            
+            # Clear the voice state
+            context.user_data['state'] = None
+        else:
+            await update.message.reply_text(
+                "❌ Failed to save memo. Please try again.",
+                parse_mode='HTML',
+                reply_markup=get_main_menu_inline_keyboard()
+            )
 
     async def new_memo_handler(self, query, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle New Memo button press"""
@@ -251,10 +285,13 @@ class VaultBot:
                 reply_markup=get_auth_inline_keyboard()
             )
             return
-            
+        
+        # Set state to await voice message
+        context.user_data['state'] = AWAITING_VOICE
+        
         await query.edit_message_text(
             "🎤 Ready to record your memo!\n\n"
-            "Please send a voice message or type your memo.",
+            "Please send a voice message now.",
             parse_mode='HTML'
         )
 
@@ -268,21 +305,36 @@ class VaultBot:
                 reply_markup=get_auth_inline_keyboard()
             )
             return
-            
+        
+        user_id = query.from_user.id
+        memos = get_user_memos(user_id)
+        
+        if not memos:
+            await query.edit_message_text(
+                "📋 You don't have any memos yet.\n\n"
+                "Use the 'New Memo' button to create your first voice memo!",
+                parse_mode='HTML',
+                reply_markup=get_main_menu_inline_keyboard()
+            )
+            return
+        
+        # Format the memos list
+        memo_list = "\n".join([
+            f"• Memo {memo['id']} ({memo['date'].split()[0]})" for memo in memos
+        ])
+        
         await query.edit_message_text(
-            "📋 Your memos:\n\n"
-            "• Memo 1 (2023-10-15)\n"
-            "• Memo 2 (2023-10-14)\n"
-            "• Memo 3 (2023-10-13)\n\n"
-            "Select a memo to view or listen to it.",
-            parse_mode='HTML'
+            f"📋 Your memos:\n\n{memo_list}\n\n"
+            "Select a memo to listen to it.",
+            parse_mode='HTML',
+            reply_markup=get_main_menu_inline_keyboard()
         )
 
     async def help_handler(self, query, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle Help button press"""
         help_text = (
             "🤖 <b>VaultBot Help</b>\n\n"
-            "• <b>🎤 New Memo</b>: Record a new voice or text memo\n"
+            "• <b>🎤 New Memo</b>: Record a new voice memo\n"
             "• <b>📋 My Memos</b>: View your saved memos\n"
             "• <b>🔐 Lock Vault</b>: Lock your vault for security\n\n"
             "Your data is encrypted and secure. Need more help?"
@@ -291,6 +343,27 @@ class VaultBot:
             help_text, 
             parse_mode='HTML',
             reply_markup=get_help_inline_keyboard()
+        )
+
+    async def lock_handler(self, query, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Lock the vault"""
+        # Clear authentication state
+        context.user_data['authenticated'] = False
+        context.user_data['state'] = None
+        
+        await query.edit_message_text(
+            "🔒 Vault locked.\n\n"
+            "Click the button below to unlock when you're ready.",
+            parse_mode='HTML',
+            reply_markup=get_auth_inline_keyboard()
+        )
+    
+    async def back_to_menu_handler(self, query, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle Back to Menu button press"""
+        await query.edit_message_text(
+            "What would you like to do?",
+            parse_mode='HTML',
+            reply_markup=get_main_menu_inline_keyboard()
         )
         
     def run(self):
