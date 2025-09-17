@@ -54,6 +54,16 @@ def get_back_to_menu_keyboard():
         [InlineKeyboardButton("🔙 Back to Menu", callback_data="back_to_menu")]
     ])
 
+def get_memo_options_keyboard(memo_id):
+    """Keyboard with options for a specific memo"""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🗑️ Delete This Memo", callback_data=f"delete_{memo_id}"),
+            InlineKeyboardButton("🔙 Back to List", callback_data="back_to_memos")
+        ],
+        [InlineKeyboardButton("🔙 Back to Menu", callback_data="back_to_menu")]
+    ])
+
 class VaultBot:
     def __init__(self):
         self.token = os.getenv('BOT_TOKEN')
@@ -123,6 +133,8 @@ class VaultBot:
             await self.lock_handler(query, context)
         elif query.data == "back_to_menu":
             await self.back_to_menu_handler(query, context)
+        elif query.data == "back_to_memos":
+            await self.my_memos_handler(query, context)
         elif query.data.startswith("listen_"):
             await self.listen_memo_handler(query, context)
         elif query.data.startswith("delete_"):
@@ -322,19 +334,15 @@ class VaultBot:
             )
             return
         
-        # Create inline keyboard with listen and delete buttons for each memo
+        # Create inline keyboard with listen buttons for each memo
         keyboard = []
         for memo in memos:
             # Format date for display
             memo_date = memo['date'].split()[0] if ' ' in memo['date'] else memo['date']
             keyboard.append([
                 InlineKeyboardButton(
-                    f"🎵 Play #{memo['id']} ({memo_date})", 
+                    f"🎵 Memo {memo['id']} ({memo_date})", 
                     callback_data=f"listen_{memo['id']}"
-                ),
-                InlineKeyboardButton(
-                    f"🗑️ Delete", 
-                    callback_data=f"delete_{memo['id']}"
                 )
             ])
         
@@ -378,8 +386,20 @@ class VaultBot:
             logger.error(f"Error sending voice message: {e}")
             await query.answer("Error playing memo", show_alert=True)
         
-        # Keep the memo list visible after playing
-        await self.my_memos_handler(query, context)
+        # Show options for this memo (delete, back to list, back to menu)
+        memo_date = ""
+        memos = get_user_memos(user_id)
+        for memo in memos:
+            if memo['id'] == memo_id:
+                memo_date = memo['date'].split()[0] if ' ' in memo['date'] else memo['date']
+                break
+        
+        await query.edit_message_text(
+            f"🔊 Memo #{memo_id} ({memo_date})\n\n"
+            "What would you like to do with this memo?",
+            parse_mode='HTML',
+            reply_markup=get_memo_options_keyboard(memo_id)
+        )
 
     async def delete_memo_handler(self, query, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle deleting a memo"""
@@ -395,7 +415,7 @@ class VaultBot:
         # Delete the memo
         if delete_memo(memo_id, user_id):
             await query.answer(f"Memo #{memo_id} deleted")
-            # Refresh the memo list
+            # Go back to memos list
             await self.my_memos_handler(query, context)
         else:
             await query.answer("Failed to delete memo", show_alert=True)
