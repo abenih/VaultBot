@@ -108,11 +108,21 @@ class VaultBot:
             "Click the button below to get started:"
         )
         
-        await update.message.reply_text(
-            welcome_text,
-            parse_mode='HTML',
-            reply_markup=get_start_inline_keyboard()
-        )
+        # If this is a command, reply with a new message
+        if update.message:
+            await update.message.reply_text(
+                welcome_text,
+                parse_mode='HTML',
+                reply_markup=get_start_inline_keyboard()
+            )
+        # If this is a callback, edit the existing message
+        else:
+            query = update.callback_query
+            await query.edit_message_text(
+                welcome_text,
+                parse_mode='HTML',
+                reply_markup=get_start_inline_keyboard()
+            )
     
     async def inline_button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle inline button callbacks"""
@@ -275,6 +285,7 @@ class VaultBot:
         
         # Save the voice memo to database
         if save_voice_memo(user_id, file_id):
+            # Edit the current message to show success
             await update.message.reply_text(
                 "✅ Memo saved!\n\n"
                 "Your voice message has been securely stored.",
@@ -359,25 +370,27 @@ class VaultBot:
     async def listen_memo_handler(self, query, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle listening to a specific memo"""
         user_id = query.from_user.id
-        
+        chat_id = query.message.chat_id
+        message_id = query.message.message_id  # The message that contains the memo list
+
         # Extract memo ID from callback data
         try:
             memo_id = int(query.data.replace("listen_", ""))
         except ValueError:
             await query.answer("Invalid memo ID")
             return
-        
+
         # Get the file_id for this memo
         file_id = get_memo_file_id(memo_id, user_id)
-        
+
         if not file_id:
             await query.answer("Memo not found or access denied", show_alert=True)
             return
-        
-        # Send the voice message
+
+        # Send the voice message first (this will appear as a new message below the current one)
         try:
             await context.bot.send_voice(
-                chat_id=user_id,
+                chat_id=chat_id,
                 voice=file_id,
                 caption=f"🔊 Playing memo #{memo_id}"
             )
@@ -385,21 +398,31 @@ class VaultBot:
         except Exception as e:
             logger.error(f"Error sending voice message: {e}")
             await query.answer("Error playing memo", show_alert=True)
-        
-        # Show options for this memo (delete, back to list, back to menu)
+            return
+
+        # Get memo date for display
         memo_date = ""
         memos = get_user_memos(user_id)
         for memo in memos:
             if memo['id'] == memo_id:
                 memo_date = memo['date'].split()[0] if ' ' in memo['date'] else memo['date']
                 break
-        
-        await query.edit_message_text(
-            f"🔊 Memo #{memo_id} ({memo_date})\n\n"
-            "What would you like to do with this memo?",
+
+        # Send a new message with the options menu (this will appear below the voice message)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"🔊 Memo #{memo_id} ({memo_date})\n\n"
+                 "What would you like to do with this memo?",
             parse_mode='HTML',
             reply_markup=get_memo_options_keyboard(memo_id)
         )
+
+        # Delete the original memo list message to keep the chat clean
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except Exception as e:
+            logger.error(f"Error deleting message: {e}")
+            # If deletion fails, it's not critical
 
     async def delete_memo_handler(self, query, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle deleting a memo"""
