@@ -154,6 +154,27 @@ def get_user_memos(user_id: int) -> List[Dict]:
         logger.error(f"Error retrieving memos: {e}")
         return []
 
+def get_memo_file_id(memo_id: int, user_id: int) -> Optional[str]:
+    """Get file_id for a specific memo, ensuring it belongs to the user"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            'SELECT file_id FROM memos WHERE id = ? AND user_id = ?',
+            (memo_id, user_id)
+        )
+        
+        result = cursor.fetchone()
+        conn.close()
+        
+        if result:
+            return result[0]
+        return None
+    except Exception as e:
+        logger.error(f"Error getting memo: {e}")
+        return None
+
 def delete_memo(memo_id: int, user_id: int) -> bool:
     """Delete a specific memo"""
     try:
