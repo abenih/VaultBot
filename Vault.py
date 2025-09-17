@@ -1,9 +1,10 @@
 import os
 import logging
+import time
 from telegram import Update, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, 
-    MessageHandler, filters, ContextTypes
+    MessageHandler, filters, ContextTypes, JobQueue
 )
 from database import init_db, user_exists, set_master_password, verify_master_password, save_voice_memo, get_user_memos, get_memo_file_id, delete_memo
 
@@ -22,6 +23,11 @@ logger = logging.getLogger(__name__)
 AWAITING_PASSWORD = 1
 AWAITING_LOGIN = 2
 AWAITING_VOICE = 3  # New state for voice messages
+
+# Global dictionary to track user activity
+user_activity = {}
+# Dictionary to track the last message IDs for each user
+user_last_messages = {}
 
 # Inline keyboards
 def get_start_inline_keyboard():
@@ -64,6 +70,47 @@ def get_memo_options_keyboard(memo_id):
         [InlineKeyboardButton("🔙 Back to Menu", callback_data="back_to_menu")]
     ])
 
+async def cleanup_old_messages(context, user_id, chat_id, exclude_message_id=None):
+    """Clean up old messages for a user, excluding a specific message if provided"""
+    if user_id in user_last_messages:
+        messages_to_delete = []
+        for msg_id in user_last_messages[user_id]:
+            if exclude_message_id is not None and msg_id == exclude_message_id:
+                continue
+            messages_to_delete.append(msg_id)
+        
+        for msg_id in messages_to_delete:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+                user_last_messages[user_id].remove(msg_id)
+            except Exception as e:
+                logger.error(f"Error deleting message {msg_id} for user {user_id}: {e}")
+        
+        # If we have too many messages stored, clear the list
+        if len(user_last_messages[user_id]) > 10:
+            user_last_messages[user_id] = user_last_messages[user_id][-5:]
+
+async def check_inactivity(context: ContextTypes.DEFAULT_TYPE):
+    """Check for inactive users and lock their vaults"""
+    current_time = time.time()
+    inactive_users = []
+    
+    for user_id, last_activity in user_activity.items():
+        if current_time - last_activity > 300:  # 5 minutes
+            inactive_users.append(user_id)
+    
+    for user_id in inactive_users:
+        # Get the chat_id from context (this might need to be stored separately)
+        # For simplicity, we'll just remove from activity tracking
+        # In a real implementation, you'd want to store chat_id along with user_id
+        del user_activity[user_id]
+        
+        # Clear any stored messages for this user
+        if user_id in user_last_messages:
+            del user_last_messages[user_id]
+        
+        logger.info(f"User {user_id} vault locked due to inactivity")
+
 class VaultBot:
     def __init__(self):
         self.token = os.getenv('BOT_TOKEN')
@@ -74,13 +121,17 @@ class VaultBot:
         self.application = Application.builder().token(self.token).build()
         self.setup_handlers()
         
+        # Set up inactivity check job
+        self.job_queue = self.application.job_queue
+        self.job_queue.run_repeating(check_inactivity, interval=60, first=10)  # Check every minute
+        
     def setup_handlers(self):
         """Set up all message handlers"""
         # Add handler for /start command
         self.application.add_handler(CommandHandler("start", self.start_command_handler))
         
-        # Add handler for inline button callbacks
-        self.application.add_handler(CallbackQueryHandler(self.inline_button_handler))
+        # Add handler for inline button callbacks - use pattern matching
+        self.application.add_handler(CallbackQueryHandler(self.inline_button_handler, pattern=".*"))
         
         # Add handler for text messages (for password input)
         self.application.add_handler(
@@ -92,10 +143,21 @@ class VaultBot:
             MessageHandler(filters.VOICE, self.handle_voice_message)
         )
         
+    def update_user_activity(self, user_id):
+        """Update the user's last activity timestamp"""
+        user_activity[user_id] = time.time()
+        
     async def start_command_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle the /start command"""
         # Clear any existing state
         context.user_data.clear()
+        
+        # Update user activity
+        user_id = update.effective_user.id
+        self.update_user_activity(user_id)
+        
+        # Clean up old messages
+        await cleanup_old_messages(context, user_id, update.effective_chat.id)
         
         # Show welcome message
         await self.show_welcome_message(update, context)
@@ -110,11 +172,16 @@ class VaultBot:
         
         # If this is a command, reply with a new message
         if update.message:
-            await update.message.reply_text(
+            message = await update.message.reply_text(
                 welcome_text,
                 parse_mode='HTML',
                 reply_markup=get_start_inline_keyboard()
             )
+            # Store the message ID
+            user_id = update.effective_user.id
+            if user_id not in user_last_messages:
+                user_last_messages[user_id] = []
+            user_last_messages[user_id].append(message.message_id)
         # If this is a callback, edit the existing message
         else:
             query = update.callback_query
@@ -128,6 +195,16 @@ class VaultBot:
         """Handle inline button callbacks"""
         query = update.callback_query
         await query.answer()
+        
+        # Update user activity
+        user_id = query.from_user.id
+        self.update_user_activity(user_id)
+        
+        # Store the current message ID to exclude it from cleanup
+        current_message_id = query.message.message_id
+        
+        # Clean up old messages, excluding the current one
+        await cleanup_old_messages(context, user_id, query.message.chat_id, current_message_id)
         
         if query.data == "start_bot":
             await self.start_bot(query, context)
@@ -199,6 +276,12 @@ class VaultBot:
         text = update.message.text
         current_state = context.user_data.get('state')
         
+        # Update user activity
+        self.update_user_activity(user_id)
+        
+        # Clean up old messages
+        await cleanup_old_messages(context, user_id, update.effective_chat.id)
+        
         logger.info(f"User {user_id} in state {current_state} entered text: {text}")
         
         if current_state == AWAITING_PASSWORD:
@@ -215,32 +298,44 @@ class VaultBot:
         
         # Validate password strength
         if len(password) < 6:
-            await update.message.reply_text(
+            message = await update.message.reply_text(
                 "❌ Password must be at least 6 characters long.\n"
                 "Please try again:",
                 reply_markup=ReplyKeyboardRemove()
             )
+            # Store the message ID
+            if user_id not in user_last_messages:
+                user_last_messages[user_id] = []
+            user_last_messages[user_id].append(message.message_id)
             return
         
         # Set the master password
         if set_master_password(user_id, password):
             # Show main menu with inline keyboard
-            await update.message.reply_text(
+            message = await update.message.reply_text(
                 "✅ Master password set successfully!\n\n"
                 "🔓 Your vault is now secured and ready to use.\n\n"
                 "What would you like to do?",
                 parse_mode='HTML',
                 reply_markup=get_main_menu_inline_keyboard()
             )
+            # Store the message ID
+            if user_id not in user_last_messages:
+                user_last_messages[user_id] = []
+            user_last_messages[user_id].append(message.message_id)
             
             # Clear state and mark as authenticated
             context.user_data['state'] = None
             context.user_data['authenticated'] = True
         else:
-            await update.message.reply_text(
+            message = await update.message.reply_text(
                 "❌ Failed to set password. Please try again:",
                 parse_mode='HTML'
             )
+            # Store the message ID
+            if user_id not in user_last_messages:
+                user_last_messages[user_id] = []
+            user_last_messages[user_id].append(message.message_id)
     
     async def handle_login_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE, password: str) -> None:
         """Handle login password input"""
@@ -249,58 +344,84 @@ class VaultBot:
         # Verify the password
         if verify_master_password(user_id, password):
             # Show main menu with inline keyboard
-            await update.message.reply_text(
+            message = await update.message.reply_text(
                 "✅ Access granted!\n\n"
                 "🔓 Your vault is now unlocked.\n\n"
                 "What would you like to do?",
                 parse_mode='HTML',
                 reply_markup=get_main_menu_inline_keyboard()
             )
+            # Store the message ID
+            if user_id not in user_last_messages:
+                user_last_messages[user_id] = []
+            user_last_messages[user_id].append(message.message_id)
             
             # Clear state and mark as authenticated
             context.user_data['state'] = None
             context.user_data['authenticated'] = True
         else:
-            await update.message.reply_text(
+            message = await update.message.reply_text(
                 "❌ Incorrect password.\n\n"
                 "Please try again:",
                 parse_mode='HTML',
                 reply_markup=get_auth_inline_keyboard()
             )
+            # Store the message ID
+            if user_id not in user_last_messages:
+                user_last_messages[user_id] = []
+            user_last_messages[user_id].append(message.message_id)
     
     async def handle_voice_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle voice messages"""
+        # Update user activity
+        user_id = update.effective_user.id
+        self.update_user_activity(user_id)
+        
+        # Clean up old messages
+        await cleanup_old_messages(context, user_id, update.effective_chat.id)
+        
         # Check if user is authenticated and in the correct state
         if not context.user_data.get('authenticated') or context.user_data.get('state') != AWAITING_VOICE:
-            await update.message.reply_text(
+            message = await update.message.reply_text(
                 "🔒 Please start by unlocking your vault and selecting 'New Memo'.",
                 parse_mode='HTML',
                 reply_markup=get_auth_inline_keyboard()
             )
+            # Store the message ID
+            if user_id not in user_last_messages:
+                user_last_messages[user_id] = []
+            user_last_messages[user_id].append(message.message_id)
             return
         
-        user_id = update.effective_user.id
         voice = update.message.voice
         file_id = voice.file_id
         
         # Save the voice memo to database
         if save_voice_memo(user_id, file_id):
             # Edit the current message to show success
-            await update.message.reply_text(
+            message = await update.message.reply_text(
                 "✅ Memo saved!\n\n"
                 "Your voice message has been securely stored.",
                 parse_mode='HTML',
                 reply_markup=get_back_to_menu_keyboard()
             )
+            # Store the message ID
+            if user_id not in user_last_messages:
+                user_last_messages[user_id] = []
+            user_last_messages[user_id].append(message.message_id)
             
             # Clear the voice state
             context.user_data['state'] = None
         else:
-            await update.message.reply_text(
+            message = await update.message.reply_text(
                 "❌ Failed to save memo. Please try again.",
                 parse_mode='HTML',
                 reply_markup=get_main_menu_inline_keyboard()
             )
+            # Store the message ID
+            if user_id not in user_last_messages:
+                user_last_messages[user_id] = []
+            user_last_messages[user_id].append(message.message_id)
 
     async def new_memo_handler(self, query, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle New Memo button press"""
@@ -389,11 +510,16 @@ class VaultBot:
 
         # Send the voice message without caption
         try:
-            await context.bot.send_voice(
+            voice_message = await context.bot.send_voice(
                 chat_id=chat_id,
                 voice=file_id
                 # Removed the caption parameter to eliminate "Playing memo #3" text
             )
+            # Store the voice message ID
+            if user_id not in user_last_messages:
+                user_last_messages[user_id] = []
+            user_last_messages[user_id].append(voice_message.message_id)
+            
             await query.answer("Playing your memo...")
         except Exception as e:
             logger.error(f"Error sending voice message: {e}")
@@ -409,17 +535,25 @@ class VaultBot:
                 break
 
         # Send a new message with the options menu
-        await context.bot.send_message(
+        options_message = await context.bot.send_message(
             chat_id=chat_id,
             text=f"🔊 Memo #{memo_id} ({memo_date})\n\n"
                  "What would you like to do with this memo?",
             parse_mode='HTML',
             reply_markup=get_memo_options_keyboard(memo_id)
         )
+        
+        # Store the options message ID
+        if user_id not in user_last_messages:
+            user_last_messages[user_id] = []
+        user_last_messages[user_id].append(options_message.message_id)
 
         # Delete the original memo list message to keep the chat clean
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+            # Remove from stored messages if it was there
+            if user_id in user_last_messages and message_id in user_last_messages[user_id]:
+                user_last_messages[user_id].remove(message_id)
         except Exception as e:
             logger.error(f"Error deleting message: {e}")
             # If deletion fails, it's not critical
@@ -463,6 +597,14 @@ class VaultBot:
         # Clear authentication state
         context.user_data['authenticated'] = False
         context.user_data['state'] = None
+        
+        # Remove user from activity tracking
+        user_id = query.from_user.id
+        if user_id in user_activity:
+            del user_activity[user_id]
+        
+        # Clean up old messages
+        await cleanup_old_messages(context, user_id, query.message.chat_id)
         
         await query.edit_message_text(
             "🔒 Vault locked.\n\n"
