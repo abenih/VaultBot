@@ -1,11 +1,11 @@
 import os
 import logging
 import time
-# --- Import OpenAI library ---
+
 import openai
-# Import specific error classes for better handling
+
 from openai import APIError, RateLimitError
-# --- Import for temporary file handling ---
+
 import tempfile
 import os
 
@@ -14,33 +14,33 @@ from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes, JobQueue
 )
-# Import database functions
+
 from database import (
     init_db, user_exists, set_master_password, verify_master_password,
     save_voice_memo, get_user_memos, get_memo_file_id, delete_memo,
     get_db_connection
 )
 
-# Load environment variables
+
 from dotenv import load_dotenv
 load_dotenv()
 
-# Enable logging
+
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# --- Configure OpenAI library for LemonFox.ai ---
+
 LEMONFOX_API_KEY = os.getenv("LEMONFOX_API_KEY")
 lemonfox_client = None
 if LEMONFOX_API_KEY:
     try:
-        # Configure the OpenAI client to use LemonFox's endpoint
+        
         lemonfox_client = openai.OpenAI(
             api_key=LEMONFOX_API_KEY,
-            base_url="https://api.lemonfox.ai/v1" # LemonFox API base URL
+            base_url="https://api.lemonfox.ai/v1" 
         )
         logger.info("OpenAI client configured for LemonFox.ai")
     except Exception as e:
@@ -48,14 +48,14 @@ if LEMONFOX_API_KEY:
 else:
     logger.warning("⚠️ LEMONFOX_API_KEY not found in environment variables. AI features will be disabled or fail.")
 
-# Conversation states
+
 AWAITING_PASSWORD = 1
 AWAITING_LOGIN = 2
 AWAITING_VOICE = 3
 
-# Global dictionary to track user activity
+
 user_activity = {}
-# Dictionary to track the last message IDs for each user
+
 user_last_messages = {}
 
 # --- Inline keyboards ---
@@ -80,7 +80,7 @@ def get_main_menu_inline_keyboard():
 
 def get_help_inline_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📞 Contact Support", url="https://t.me/your_support")],
+        [InlineKeyboardButton("📞 Contact Support", url="https://t.me/abeni_h")],
         [InlineKeyboardButton("🚀 Start Over", callback_data="start_bot")]
     ])
 
@@ -120,16 +120,16 @@ async def cleanup_old_messages(context, user_id, chat_id, exclude_message_id=Non
             except Exception as e:
                 logger.warning(f"Could not delete message {msg_id} for user {user_id}: {e}")
 
-        # Prevent list from growing indefinitely
+        
         if len(user_last_messages[user_id]) > 10:
             user_last_messages[user_id] = user_last_messages[user_id][-5:]
 
 def update_user_activity(user_id):
-    """Update the user's last activity timestamp"""
+    
     user_activity[user_id] = time.time()
 
 async def check_inactivity(context: ContextTypes.DEFAULT_TYPE):
-    """Check for inactive users and lock their vaults"""
+    
     current_time = time.time()
     inactive_users = []
 
@@ -138,17 +138,16 @@ async def check_inactivity(context: ContextTypes.DEFAULT_TYPE):
             inactive_users.append(user_id)
 
     for user_id in inactive_users:
-        # Remove from activity tracking
+       
         if user_id in user_activity:
             del user_activity[user_id]
 
-        # Clear any stored messages for this user
+        
         if user_id in user_last_messages:
             del user_last_messages[user_id]
 
         logger.info(f"User {user_id} vault locked due to inactivity")
-        # Note: Cannot proactively send message without stored chat_id.
-        # Lock will be enforced on next user interaction.
+        
 
 # --- Main Bot Class ---
 class VaultBot:
@@ -161,7 +160,7 @@ class VaultBot:
         self.application = Application.builder().token(self.token).build()
         self.setup_handlers()
 
-        # Set up inactivity check job
+       
         self.job_queue = self.application.job_queue
         if self.job_queue:
              self.job_queue.run_repeating(check_inactivity, interval=60, first=10)
@@ -170,21 +169,19 @@ class VaultBot:
 
     def setup_handlers(self):
         """Set up all message handlers"""
-        # Command handler
+       
         self.application.add_handler(CommandHandler("start", self.start_command_handler))
 
-        # Specific handlers for transcribe/summarize MUST come BEFORE the general pattern handler
         self.application.add_handler(CallbackQueryHandler(self.transcribe_memo_handler, pattern=r'^transcribe_\d+$'))
         self.application.add_handler(CallbackQueryHandler(self.summarize_memo_handler, pattern=r'^summarize_\d+$'))
 
-        # General inline button handler
         self.application.add_handler(CallbackQueryHandler(self.inline_button_handler, pattern=".*"))
 
-        # Text and voice message handlers
+        
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text_input))
         self.application.add_handler(MessageHandler(filters.VOICE, self.handle_voice_message))
 
-    # --- Command & Button Handlers ---
+    
     async def start_command_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         context.user_data.clear()
         user_id = update.effective_user.id
@@ -195,7 +192,7 @@ class VaultBot:
     async def show_welcome_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         welcome_text = (
             "🔒 Welcome to VaultBot! 🔒\n\n"
-            "Your secure, voice-based journal.\n\n"
+            "Your secure, voice-based journal.\nEquiped with AI assisted transciption and summerization[openai's whisper model]\n"
             "Click the button below to get started:"
         )
         if update.message:
@@ -277,7 +274,7 @@ class VaultBot:
             user_last_messages[user_id].append(message.message_id)
             return
         if set_master_password(user_id, password):
-            message = await update.message.reply_text("✅ Master password set successfully!\n\n🔓 Your vault is now secured and ready to use.\n\nWhat would you like to do?", parse_mode='HTML', reply_markup=get_main_menu_inline_keyboard())
+            message = await update.message.reply_text("✅ Password set successfully!\n\n🔓 Your vault is now secured and ready to use.\n\nWhat would you like to do?", parse_mode='HTML', reply_markup=get_main_menu_inline_keyboard())
             if user_id not in user_last_messages: user_last_messages[user_id] = []
             user_last_messages[user_id].append(message.message_id)
             context.user_data['state'] = None
@@ -459,14 +456,14 @@ class VaultBot:
                 await file.download_to_drive(tmp_file.name)
                 tmp_path = tmp_file.name
 
-            # Call LemonFox Whisper API using the configured client
+           
             logger.info(f"Calling LemonFox Whisper for memo {memo_id} (user {user_id})")
             with open(tmp_path, "rb") as audio_file:
-                # Use the lemonfox_client instance
+                
                 transcript_response = lemonfox_client.audio.transcriptions.create(
                     model="whisper-1",
                     file=audio_file,
-                    response_format="verbose_json" # Get more details like language
+                    response_format="verbose_json" 
                 )
 
             transcription_text = transcript_response.text.strip()
@@ -474,7 +471,7 @@ class VaultBot:
 
             logger.info(f"LemonFox Whisper transcription complete for memo {memo_id}. Language: {detected_language}")
 
-            # --- Error/Warning Handling for Transcription ---
+            
             if not transcription_text:
                 warning_msg = (
                     f"⚠️ Transcription resulted in empty text.\n"
@@ -493,7 +490,7 @@ class VaultBot:
             conn.commit()
             conn.close()
 
-            # Update message with transcription
+            
             await query.edit_message_text(text=f"📝 Transcription:\n\n{transcription_text}", reply_markup=get_memo_options_keyboard(memo_id))
             await query.answer("✅ Transcription complete!")
 
@@ -502,7 +499,7 @@ class VaultBot:
             error_msg = "❌ Transcription failed: Rate limit exceeded. Please try again later."
             await query.edit_message_text(error_msg, reply_markup=get_memo_options_keyboard(memo_id))
             await query.answer("Rate Limit", show_alert=True)
-        except APIError as api_err: # Catches other LemonFox API issues
+        except APIError as api_err: 
             logger.error(f"LemonFox API Error for user {user_id} on memo {memo_id}: {api_err}")
             error_msg = f"❌ Transcription failed: API Error - {str(api_err)[:150]}"
             await query.edit_message_text(error_msg, reply_markup=get_memo_options_keyboard(memo_id))
@@ -518,7 +515,7 @@ class VaultBot:
             await query.edit_message_text(error_msg, reply_markup=get_memo_options_keyboard(memo_id))
             await query.answer("Transcription Failed", show_alert=True)
         finally:
-            # Ensure temp file is always cleaned up
+            
             if tmp_path and os.path.exists(tmp_path):
                 try:
                     os.unlink(tmp_path)
@@ -531,7 +528,7 @@ class VaultBot:
         await query.answer()
         user_id = query.from_user.id
         chat_id = query.message.chat_id
-        update_user_activity(user_id) # Update activity on interaction
+        update_user_activity(user_id) 
 
         if not LEMONFOX_API_KEY or not lemonfox_client:
             await query.edit_message_text("❌ AI features are not configured. Please check the bot setup.", reply_markup=get_main_menu_inline_keyboard())
@@ -544,27 +541,25 @@ class VaultBot:
             await query.edit_message_text("❌ Invalid memo ID.", reply_markup=get_main_menu_inline_keyboard())
             return
 
-        # --- Fetch transcription (transcribe if needed) ---
+        
         conn = None
         transcription_text = None
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
 
-            # Check for existing transcription
+            
             cursor.execute("SELECT transcription FROM memos WHERE id = ? AND user_id = ?", (memo_id, user_id))
             row = cursor.fetchone()
             if row and row[0]:
                 transcription_text = row[0]
             else:
-                # No transcription, trigger transcription first
+               
                 logger.info(f"No transcription found for memo {memo_id}, triggering transcription first.")
-                # Simulate the transcribe callback query update
-                # Note: This direct call reuses the update object, which is okay here.
+                
                 update.callback_query.data = f"transcribe_{memo_id}"
                 await self.transcribe_memo_handler(update, context)
-                # After transcribe_memo_handler runs, it will update the message.
-                # We don't need to proceed further in this summarize handler call.
+               
                 return
 
             # Check if already summarized
@@ -584,17 +579,17 @@ class VaultBot:
         try:
             await query.edit_message_text("🧠 Generating summary... Please wait.")
 
-            # Call LemonFox LLM API using the configured client
+            
             logger.info(f"Calling LemonFox LLM for summary of memo {memo_id} (user {user_id})")
-            # Use the lemonfox_client instance
+            
             response = lemonfox_client.chat.completions.create(
-                model="llama3-8b", # Or another model available on LemonFox, check their docs
+                model="llama3-8b", 
                 messages=[
                     {"role": "system", "content": "You are a helpful assistant that summarizes voice memos concisely."},
                     {"role": "user", "content": f"Please provide a concise one-paragraph summary of the following text:\n\n{transcription_text}"}
                 ],
                 temperature=0.3,
-                max_tokens=200 # Slightly higher for summary
+                max_tokens=200 
             )
             summary = response.choices[0].message.content.strip()
             logger.info(f"LemonFox LLM summary complete for memo {memo_id}.")
